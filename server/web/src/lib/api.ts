@@ -86,10 +86,32 @@ export interface Delivery {
   event_id: string
   device_id: string
   device_name: string
+  transport?: 'apns' | 'web_push'
   status: 'sent' | 'failed' | 'skipped'
   apns_id?: string
+  message_id?: string
   error?: string
   attempted_at: string
+}
+
+export interface WebPushConfig {
+  enabled: boolean
+  public_key: string
+}
+
+export interface WebPushSubscriptionInput {
+  endpoint: string
+  keys: { p256dh: string; auth: string }
+  name: string
+}
+
+export interface WebPushSubscription {
+  id: string
+  name: string
+  user_agent?: string
+  last_success_at?: string
+  created_at: string
+  updated_at: string
 }
 
 export interface PairingToken {
@@ -115,6 +137,10 @@ export interface Status {
     key_id?: string
     bundle_id?: string
     environment: string
+  }
+  web_push: {
+    configured: boolean
+    subscriptions: number
   }
   devices: number
   pushable_devices: number
@@ -202,6 +228,10 @@ export const api = {
   updateDevice: (id: string, patch: { name?: string }) => request<Device>('PATCH', `/api/v1/devices/${id}`, patch),
   deleteDevice: (id: string) => request<void>('DELETE', `/api/v1/devices/${id}`),
 
+  webPushConfig: () => request<WebPushConfig>('GET', '/api/v1/web-push/config'),
+  subscribeWebPush: (input: WebPushSubscriptionInput) => request<WebPushSubscription>('POST', '/api/v1/web-push/subscriptions', input),
+  unsubscribeWebPush: (endpoint: string) => request<void>('DELETE', '/api/v1/web-push/subscriptions', { endpoint }),
+
   createPairing: () => request<PairingToken>('POST', '/api/v1/pairing'),
   pendingPairings: () => request<{ pairing_tokens: PairingToken[] }>('GET', '/api/v1/pairing'),
   revokePairing: (id: string) => request<void>('DELETE', `/api/v1/pairing/${id}`),
@@ -213,5 +243,5 @@ export const api = {
   deleteSilence: (id: string) => request<void>('DELETE', `/api/v1/silences/${id}`),
 
   test: (project_id?: string) =>
-    request<{ event: Event; deliveries: Delivery[]; apns_configured: boolean }>('POST', '/api/v1/test', project_id ? { project_id } : {}),
+    request<{ event: Event; deliveries: Delivery[]; apns_configured: boolean; web_push_configured: boolean }>('POST', '/api/v1/test', project_id ? { project_id } : {}),
 }

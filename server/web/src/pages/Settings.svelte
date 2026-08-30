@@ -13,6 +13,7 @@
   import Metric from '../lib/ui/Metric.svelte'
   import { panel, pop, reorder, soft } from '../lib/motion'
   import Skeleton from '../lib/ui/Skeleton.svelte'
+  import WebPushControl from '../lib/ui/WebPushControl.svelte'
   import { link } from '../lib/router.svelte'
 
   let status = $state<Status | null>(null)
@@ -20,7 +21,7 @@
   let projects = $state<Project[]>([])
   let error = $state('')
   let testing = $state(false)
-  let testResult = $state<{ deliveries: Delivery[]; apns_configured: boolean } | null>(null)
+  let testResult = $state<{ deliveries: Delivery[]; apns_configured: boolean; web_push_configured: boolean } | null>(null)
   let newKey = $state('')
   let testProject = $state('')
   let silences = $state<Silence[]>([])
@@ -132,6 +133,8 @@
     { value: '0', label: 'Unlimited' },
   ]
   const lastPush = $derived(status?.last_push ?? null)
+  const apnsTestDeliveries = $derived(testResult?.deliveries.filter((delivery) => delivery.transport !== 'web_push') ?? [])
+  const webPushTestDeliveries = $derived(testResult?.deliveries.filter((delivery) => delivery.transport === 'web_push') ?? [])
   const origin = typeof location !== 'undefined' ? location.origin : ''
 </script>
 
@@ -169,6 +172,14 @@
           {/if}
         </div>
         <div>
+          <span class="k">Web Push</span>
+          {#if status.web_push.configured}
+            <StatusDot tone={status.web_push.subscriptions > 0 ? 'ok' : 'muted'}>{status.web_push.subscriptions} active subscription{status.web_push.subscriptions === 1 ? '' : 's'}</StatusDot>
+          {:else}
+            <StatusDot tone="bad">Unavailable</StatusDot>
+          {/if}
+        </div>
+        <div>
           <span class="k">Last push</span>
           {#if lastPush}
             <StatusDot tone={lastPush.status === 'sent' ? 'ok' : lastPush.status === 'failed' ? 'bad' : 'muted'}>
@@ -196,6 +207,9 @@
       {:else if lastPush?.status === 'failed' && lastPush.error}
         <div style="margin-top: 16px"><Notice tone="bad">Last push failed: {lastPush.error}</Notice></div>
       {/if}
+      {#if status.web_push.subscriptions > 0}
+        <div style="margin-top: 16px"><Notice tone="good">Web Push is active for {status.web_push.subscriptions} browser subscription{status.web_push.subscriptions === 1 ? '' : 's'}.</Notice></div>
+      {/if}
     </Card>
 
     <Card title="Apple Push Notifications">
@@ -211,6 +225,11 @@
       {/if}
     </Card>
 
+    <Card title="Web Push">
+      <p class="secondary lead">Install Boop on your Home Screen and receive iPhone system notifications without an Apple Developer account. The VAPID identity is generated once and backed up with this SQLite database.</p>
+      <div style="margin-top: 16px"><WebPushControl onchange={load} /></div>
+    </Card>
+
     <Card title="Test Boop">
       <p class="secondary lead">Creates a test event and pushes it to every paired phone.</p>
       <div class="row" style="margin-top: 12px; flex-wrap: wrap">
@@ -219,18 +238,31 @@
       </div>
       {#if testResult}
         <div style="margin-top: 16px" transition:panel>
-          {#if testResult.deliveries.length === 0}
+          {#if apnsTestDeliveries.length === 0}
             <Notice tone="info">Event created. No paired phones with push registered, so nothing was sent.</Notice>
           {:else if !testResult.apns_configured}
-            <Notice tone="warn">Event created, but APNs is not configured so {testResult.deliveries.length} delivery{testResult.deliveries.length === 1 ? ' was' : 'ies were'} skipped.</Notice>
-          {:else if testResult.deliveries.every((d) => d.status === 'sent')}
-            <Notice tone="good">Sent to {testResult.deliveries.length} device{testResult.deliveries.length === 1 ? '' : 's'}.</Notice>
+            <Notice tone="warn">Event created, but APNs is not configured so {apnsTestDeliveries.length} delivery{apnsTestDeliveries.length === 1 ? ' was' : 'ies were'} skipped.</Notice>
+          {:else if apnsTestDeliveries.every((d) => d.status === 'sent')}
+            <Notice tone="good">Sent to {apnsTestDeliveries.length} device{apnsTestDeliveries.length === 1 ? '' : 's'}.</Notice>
           {:else}
             <Notice tone="bad">
-              {#each testResult.deliveries.filter((d) => d.status !== 'sent') as d (d.id)}
+              {#each apnsTestDeliveries.filter((d) => d.status !== 'sent') as d (d.id)}
                 <div>{d.device_name}: {d.error}</div>
               {/each}
             </Notice>
+          {/if}
+          {#if webPushTestDeliveries.length > 0}
+            <div style="margin-top: 8px">
+              {#if webPushTestDeliveries.every((delivery) => delivery.status === 'sent')}
+                <Notice tone="good">Web Push sent to {webPushTestDeliveries.length} browser subscription{webPushTestDeliveries.length === 1 ? '' : 's'}.</Notice>
+              {:else}
+                <Notice tone="bad">
+                  {#each webPushTestDeliveries.filter((delivery) => delivery.status !== 'sent') as delivery (delivery.id)}
+                    <div>{delivery.device_name}: {delivery.error}</div>
+                  {/each}
+                </Notice>
+              {/if}
+            </div>
           {/if}
         </div>
       {/if}

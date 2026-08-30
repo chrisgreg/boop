@@ -296,6 +296,18 @@ Any client that supports Streamable HTTP with a custom header can connect the sa
 6. Build the iOS app (`open ios/Boop.xcodeproj`, set your team and the same bundle id — see [ios/README.md](ios/README.md)), install it on your phone, open Devices → Pair iPhone, and scan the QR.
 7. Settings → Send test notification.
 
+## Web Push on iPhone
+
+1. Deploy Boop at a public HTTPS URL and set `BOOP_BASE_URL` to it.
+2. Open that URL in Safari on iOS 16.4 or newer and sign in.
+3. Choose **Share → Add to Home Screen**.
+4. Open Boop from its Home Screen icon and select **Enable notifications** in Settings.
+5. Send a test notification. iOS presents it on the Lock Screen and in Notification Center according to the device's Focus settings.
+
+Boop generates its VAPID keypair once and stores it in SQLite. Restarts keep existing subscriptions valid; restoring the database restores the same push identity. An expired browser subscription is removed automatically after a push service returns HTTP 404 or 410.
+
+iOS Home Screen apps keep storage separate from Safari. If admin authentication is enabled, sign in again after opening the installed Home Screen app. Set `BOOP_BASE_URL` to the public HTTPS origin; when it is unset or not HTTPS, the VAPID subject falls back to `mailto:boop@localhost`.
+
 ## Deploying with Dokploy (or any compose host)
 
 Use `docker-compose.dokploy.yml`, not `docker-compose.yml`. It swaps the `./data` bind mount for a named volume (the bind mount is created root-owned on the host, and the image runs as uid 1000, so SQLite cannot write `/data/boop.db`), joins the external `dokploy-network` so Traefik can route to it, and drops the published port so the server is reachable only through your HTTPS proxy.

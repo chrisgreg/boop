@@ -15,6 +15,7 @@
 
   let setupCompleted = $state<boolean | null>(null)
   let apnsConfigured = $state<boolean | null>(null)
+  let webPushSubscriptions = $state(0)
   let unreachable = $state(false)
   let authRequired = $state(false)
   let needsLogin = $state(false)
@@ -33,6 +34,7 @@
       const s = await api.status()
       setupCompleted = s.setup_completed
       apnsConfigured = s.apns.configured
+      webPushSubscriptions = s.web_push.subscriptions
       unreachable = false
       if (!s.setup_completed && router.route.name !== 'setup') router.navigate('/setup', true)
     } catch {
@@ -75,6 +77,9 @@
         <a href="/settings" onclick={link} class="plain"><StatusDot tone="warn">APNs not configured</StatusDot></a>
       {:else if apnsConfigured}
         <StatusDot tone="ok">Push ready</StatusDot>
+      {/if}
+      {#if !unreachable && !needsLogin && webPushSubscriptions > 0}
+        <a href="/settings" onclick={link} class="plain"><StatusDot tone="ok">Web Push ready</StatusDot></a>
       {/if}
       {#if authRequired && !needsLogin}
         <button type="button" class="signout" onclick={signOut}>Sign out</button>

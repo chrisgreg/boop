@@ -26,6 +26,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/webpush"
 )
 
 // Version is the server version, overridden at build time via -ldflags.
@@ -33,21 +34,23 @@ var Version = "1.3.0"
 
 // Server holds every dependency the handlers need.
 type Server struct {
-	Config     config.Config
-	DB         *sql.DB
-	Log        *slog.Logger
-	Settings   *settings.Store
-	Projects   *projects.Store
-	Devices    *devices.Store
-	Pairing    *pairing.Store
-	Events     *events.Store
-	Silences   *silences.Store
-	Dispatcher *delivery.Dispatcher
-	APNS       *apns.Client // nil when not configured
-	APNSError  string       // why APNS is nil
-	Admin      *auth.Admin  // web UI / admin API login; open when not enabled
-	StartedAt  time.Time
-	Web        http.Handler
+	Config        config.Config
+	DB            *sql.DB
+	Log           *slog.Logger
+	Settings      *settings.Store
+	Projects      *projects.Store
+	Devices       *devices.Store
+	Pairing       *pairing.Store
+	Events        *events.Store
+	Silences      *silences.Store
+	WebPush       *webpush.Store
+	Dispatcher    *delivery.Dispatcher
+	WebPushClient *webpush.Client
+	APNS          *apns.Client // nil when not configured
+	APNSError     string       // why APNS is nil
+	Admin         *auth.Admin  // web UI / admin API login; open when not enabled
+	StartedAt     time.Time
+	Web           http.Handler
 }
 
 // Handler builds the router.
@@ -78,6 +81,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/devices/{id}", s.deviceOrAdmin(s.updateDevice))
 	mux.Handle("DELETE /api/v1/devices/{id}", s.deviceOrAdmin(s.deleteDevice))
 	mux.Handle("GET /api/v1/devices", s.adminAuth(s.listDevices))
+
+	// Standards-based Web Push for the installed PWA.
+	mux.Handle("GET /api/v1/web-push/config", s.adminAuth(s.webPushConfig))
+	mux.Handle("POST /api/v1/web-push/subscriptions", s.adminAuth(s.registerWebPush))
+	mux.Handle("DELETE /api/v1/web-push/subscriptions", s.adminAuth(s.deleteWebPush))
 
 	// Pairing.
 	mux.Handle("POST /api/v1/pairing", s.adminAuth(s.createPairing))
@@ -358,7 +366,7 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, projects.ErrNotFound), errors.Is(err, events.ErrNotFound), errors.Is(err, devices.ErrNotFound), errors.Is(err, pairing.ErrNotFound), errors.Is(err, silences.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
-	case errors.Is(err, projects.ErrInvalid), errors.Is(err, events.ErrInvalid), errors.Is(err, devices.ErrInvalid), errors.Is(err, silences.ErrInvalid):
+	case errors.Is(err, projects.ErrInvalid), errors.Is(err, events.ErrInvalid), errors.Is(err, devices.ErrInvalid), errors.Is(err, silences.ErrInvalid), errors.Is(err, webpush.ErrInvalid):
 		writeError(w, http.StatusUnprocessableEntity, "invalid", err.Error())
 	case errors.Is(err, pairing.ErrInvalidToken):
 		writeError(w, http.StatusUnauthorized, "invalid_pairing_token", err.Error())
@@ -394,6 +402,7 @@ type statusResponse struct {
 	BaseURL        string             `json:"base_url"`
 	UptimeSeconds  int64              `json:"uptime_seconds"`
 	APNS           apnsStatus         `json:"apns"`
+	WebPush        webPushStatus      `json:"web_push"`
 	Devices        int                `json:"devices"`
 	PushableDevice int                `json:"pushable_devices"`
 	Projects       int                `json:"projects"`
@@ -414,6 +423,11 @@ type apnsStatus struct {
 	Environment string   `json:"environment"`
 }
 
+type webPushStatus struct {
+	Configured    bool `json:"configured"`
+	Subscriptions int  `json:"subscriptions"`
+}
+
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	resp := statusResponse{Version: Version, Server: "ok", Database: "ok", DatabasePath: s.Config.DatabasePath, BaseURL: s.baseURL(r), UptimeSeconds: int64(time.Since(s.StartedAt).Seconds()), AdminAuth: s.Admin.Enabled()}
@@ -422,6 +436,15 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.APNS = apnsStatus{Configured: s.APNS != nil, Error: s.APNSError, Missing: s.Config.APNS.Missing(),
 		TeamID: s.Config.APNS.TeamID, KeyID: s.Config.APNS.KeyID, BundleID: s.Config.APNS.BundleID, Environment: s.Config.APNS.Environment}
+	resp.WebPush.Configured = s.WebPushClient != nil
+	if s.WebPush != nil {
+		count, countErr := s.WebPush.Count(ctx)
+		if countErr != nil {
+			s.fail(w, countErr)
+			return
+		}
+		resp.WebPush.Subscriptions = count
+	}
 	devs, err := s.Devices.List(ctx)
 	if err != nil {
 		s.fail(w, err)
@@ -874,6 +897,57 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"devices": ds})
 }
 
+// ---- Web Push ----
+
+func (s *Server) webPushConfig(w http.ResponseWriter, r *http.Request) {
+	if s.WebPushClient == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "public_key": ""})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "public_key": s.WebPushClient.PublicKey()})
+}
+
+func (s *Server) registerWebPush(w http.ResponseWriter, r *http.Request) {
+	if s.WebPush == nil || s.WebPushClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "web_push_unavailable", "Web Push is not available")
+		return
+	}
+	var in webpush.Input
+	if !readJSON(w, r, &in) {
+		return
+	}
+	sub, err := s.WebPush.Upsert(r.Context(), in, r.UserAgent())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.Log.Info("web_push.subscribed", "subscription_id", sub.ID, "name", sub.Name)
+	writeJSON(w, http.StatusCreated, sub)
+}
+
+func (s *Server) deleteWebPush(w http.ResponseWriter, r *http.Request) {
+	if s.WebPush == nil {
+		writeError(w, http.StatusServiceUnavailable, "web_push_unavailable", "Web Push is not available")
+		return
+	}
+	var in struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if strings.TrimSpace(in.Endpoint) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "endpoint is required")
+		return
+	}
+	if err := s.WebPush.DeleteEndpoint(r.Context(), in.Endpoint); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.Log.Info("web_push.unsubscribed")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---- pairing ----
 
 type pairingCreated struct {
@@ -969,5 +1043,7 @@ func (s *Server) testNotification(w http.ResponseWriter, r *http.Request) {
 	if dl == nil {
 		dl = []delivery.Delivery{}
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"event": e, "deliveries": dl, "apns_configured": s.APNS != nil})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"event": e, "deliveries": dl, "apns_configured": s.APNS != nil, "web_push_configured": s.WebPushClient != nil,
+	})
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/webpush"
 )
 
 // fakeSender records notifications instead of talking to APNs.
@@ -38,6 +39,24 @@ type sentPush struct {
 	n     apns.Notification
 }
 
+type fakeWebPushSender struct {
+	sent []sentWebPush
+	err  error
+}
+
+type sentWebPush struct {
+	subscription webpush.Subscription
+	n            webpush.Notification
+}
+
+func (f *fakeWebPushSender) Send(_ context.Context, sub webpush.Subscription, n webpush.Notification) (string, error) {
+	f.sent = append(f.sent, sentWebPush{subscription: sub, n: n})
+	if f.err != nil {
+		return "", f.err
+	}
+	return "web-message-id", nil
+}
+
 func (f *fakeSender) Send(_ context.Context, token string, n apns.Notification) (string, error) {
 	f.sent = append(f.sent, sentPush{token, n})
 	if f.err != nil {
@@ -47,10 +66,11 @@ func (f *fakeSender) Send(_ context.Context, token string, n apns.Notification) 
 }
 
 type env struct {
-	t      *testing.T
-	srv    *httptest.Server
-	server *Server
-	sender *fakeSender
+	t         *testing.T
+	srv       *httptest.Server
+	server    *Server
+	sender    *fakeSender
+	webSender *fakeWebPushSender
 }
 
 func newEnv(t *testing.T) *env {
@@ -63,23 +83,31 @@ func newEnv(t *testing.T) *env {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dev := devices.New(db)
 	sender := &fakeSender{}
+	webStore := webpush.NewStore(db)
+	webClient, err := webpush.NewClient(context.Background(), webStore, "https://boop.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	webSender := &fakeWebPushSender{}
 	s := &Server{
-		Config:     config.Config{DatabasePath: "test.db", RetentionDays: 30, APNS: config.APNS{Environment: "sandbox"}},
-		DB:         db,
-		Log:        log,
-		Settings:   settings.New(db),
-		Projects:   projects.New(db),
-		Devices:    dev,
-		Pairing:    pairing.New(db, dev),
-		Events:     events.New(db),
-		Silences:   silences.New(db),
-		Dispatcher: delivery.New(db, dev, sender, log),
-		Admin:      auth.NewAdmin("", ""),
-		StartedAt:  time.Now(),
+		Config:        config.Config{DatabasePath: "test.db", RetentionDays: 30, APNS: config.APNS{Environment: "sandbox"}},
+		DB:            db,
+		Log:           log,
+		Settings:      settings.New(db),
+		Projects:      projects.New(db),
+		Devices:       dev,
+		Pairing:       pairing.New(db, dev),
+		Events:        events.New(db),
+		Silences:      silences.New(db),
+		WebPush:       webStore,
+		Dispatcher:    delivery.New(db, dev, sender, webStore, webSender, log),
+		WebPushClient: webClient,
+		Admin:         auth.NewAdmin("", ""),
+		StartedAt:     time.Now(),
 	}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &env{t: t, srv: srv, server: s, sender: sender}
+	return &env{t: t, srv: srv, server: s, sender: sender, webSender: webSender}
 }
 
 type resp struct {
@@ -622,6 +650,69 @@ func TestDeliveryFanOut(t *testing.T) {
 	}
 }
 
+func TestWebPushSubscriptionFanOutAndExpiry(t *testing.T) {
+	e := newEnv(t)
+	e.createProject("Uini")
+	endpoint := "https://push.example.test/subscription"
+	input := map[string]any{
+		"endpoint": endpoint,
+		"keys": map[string]string{
+			"p256dh": "BNNL5ZaTfK81qhXOx23-wewhigUeFb632jN6LvRWCFH1ubQr77FE_9qV1FuojuRmHP42zmf34rXgW80OvUVDgTk",
+			"auth":   "zqbxT6JKstKSY9JKibZLSQ",
+		},
+		"name": "iPhone Home Screen",
+	}
+	if r := e.do("GET", "/api/v1/web-push/config", "", nil); r.status != 200 || len(r.body["public_key"].(string)) != 87 {
+		t.Fatalf("config: %d %s", r.status, r.raw)
+	}
+	if r := e.do("POST", "/api/v1/web-push/subscriptions", "", map[string]any{"endpoint": "http://not-secure", "keys": input["keys"]}); r.status != 422 {
+		t.Fatalf("insecure endpoint: %d %s", r.status, r.raw)
+	}
+	r := e.do("POST", "/api/v1/web-push/subscriptions", "", input)
+	if r.status != 201 || r.body["name"] != "iPhone Home Screen" {
+		t.Fatalf("subscribe: %d %s", r.status, r.raw)
+	}
+	if strings.Contains(string(r.raw), endpoint) || strings.Contains(string(r.raw), "p256dh") {
+		t.Fatalf("subscription secrets leaked: %s", r.raw)
+	}
+
+	r = e.do("POST", "/api/v1/test", "", nil)
+	if r.status != 201 {
+		t.Fatalf("test delivery: %d %s", r.status, r.raw)
+	}
+	deliveries := r.body["deliveries"].([]any)
+	if len(deliveries) != 1 || deliveries[0].(map[string]any)["transport"] != "web_push" || deliveries[0].(map[string]any)["status"] != "sent" {
+		t.Fatalf("deliveries: %s", r.raw)
+	}
+	if len(e.webSender.sent) != 1 || e.webSender.sent[0].n.URL == "" || e.webSender.sent[0].n.EventID == "" {
+		t.Fatalf("web notification = %+v", e.webSender.sent)
+	}
+	eventID := r.body["event"].(map[string]any)["id"].(string)
+	if r := e.do("GET", "/api/v1/events/"+eventID+"/deliveries", "", nil); len(r.body["deliveries"].([]any)) != 1 {
+		t.Fatalf("recorded deliveries: %s", r.raw)
+	}
+	if r := e.do("GET", "/api/v1/status", "", nil); r.body["web_push"].(map[string]any)["subscriptions"] != float64(1) {
+		t.Fatalf("status: %s", r.raw)
+	}
+
+	e.webSender.err = fmt.Errorf("gone: %w", webpush.ErrSubscriptionExpired)
+	r = e.do("POST", "/api/v1/test", "", nil)
+	if r.status != 201 || r.body["deliveries"].([]any)[0].(map[string]any)["status"] != "failed" {
+		t.Fatalf("expired delivery: %d %s", r.status, r.raw)
+	}
+	if count, err := e.server.WebPush.Count(context.Background()); err != nil || count != 0 {
+		t.Fatalf("subscriptions after expiry = %d, err = %v", count, err)
+	}
+	expiredEventID := r.body["event"].(map[string]any)["id"].(string)
+	if r := e.do("GET", "/api/v1/events/"+expiredEventID+"/deliveries", "", nil); len(r.body["deliveries"].([]any)) != 1 {
+		t.Fatalf("expired delivery history: %s", r.raw)
+	}
+
+	if r := e.do("DELETE", "/api/v1/web-push/subscriptions", "", map[string]string{"endpoint": endpoint}); r.status != 204 {
+		t.Fatalf("idempotent unsubscribe: %d %s", r.status, r.raw)
+	}
+}
+
 func TestUnregisteredTokenIsCleared(t *testing.T) {
 	e := newEnv(t)
 	e.createProject("Uini")
@@ -644,7 +735,7 @@ func TestTestNotificationWithoutAPNsOrProject(t *testing.T) {
 	if r := e.do("POST", "/api/v1/test", "", nil); r.status != 422 {
 		t.Errorf("no project: %d %s", r.status, r.raw)
 	}
-	e.server.Dispatcher = delivery.New(e.server.DB, e.server.Devices, nil, e.server.Log)
+	e.server.Dispatcher = delivery.New(e.server.DB, e.server.Devices, nil, e.server.WebPush, e.webSender, e.server.Log)
 	e.createProject("Uini")
 	_, c := e.pairDevice("phone")
 	e.do("POST", "/api/v1/devices", c, map[string]string{"device_token": "t"})
@@ -726,6 +817,9 @@ func TestAdminAuth(t *testing.T) {
 	if r := e.do("GET", "/api/v1/events", "", nil); r.status != 401 {
 		t.Errorf("events without login: %d", r.status)
 	}
+	if r := e.do("GET", "/api/v1/web-push/config", "", nil); r.status != 401 {
+		t.Errorf("web push config without login: %d", r.status)
+	}
 	if r := e.do("GET", "/health", "", nil); r.status != 200 {
 		t.Errorf("health must stay open: %d", r.status)
 	}
@@ -784,6 +878,9 @@ func TestAdminAuth(t *testing.T) {
 	}
 	if r := withCookie("GET", "/api/v1/status", nil); r.body["admin_auth"] != true {
 		t.Errorf("status should report admin_auth: %s", r.raw)
+	}
+	if r := withCookie("GET", "/api/v1/web-push/config", nil); r.status != 200 {
+		t.Errorf("web push config with session: %d %s", r.status, r.raw)
 	}
 
 	// HTTP Basic also works (for scripts).
