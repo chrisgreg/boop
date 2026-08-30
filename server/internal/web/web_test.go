@@ -19,3 +19,20 @@ func TestSPAFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestPWAAssets(t *testing.T) {
+	h := Handler()
+	for _, p := range []string{"/manifest.webmanifest", "/sw.js", "/icons/icon-192.png", "/icons/icon-512.png"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d", p, rec.Code)
+		}
+		if cache := rec.Header().Get("Cache-Control"); cache != "no-cache" {
+			t.Errorf("%s: cache-control %q", p, cache)
+		}
+		if p == "/manifest.webmanifest" && rec.Header().Get("Content-Type") != "application/manifest+json" {
+			t.Errorf("%s: content-type %q", p, rec.Header().Get("Content-Type"))
+		}
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
 	"github.com/chrisgreg/boop/server/internal/web"
+	"github.com/chrisgreg/boop/server/internal/webpush"
 )
 
 func main() {
@@ -63,6 +65,16 @@ func run() error {
 	}
 
 	devStore := devices.New(db)
+	webPushStore := webpush.NewStore(db)
+	webPushSubject := cfg.BaseURL
+	if !strings.HasPrefix(webPushSubject, "https://") {
+		webPushSubject = "mailto:boop@localhost"
+	}
+	webPushClient, err := webpush.NewClient(ctx, webPushStore, webPushSubject)
+	if err != nil {
+		return fmt.Errorf("initialize Web Push: %w", err)
+	}
+	log.Info("web_push.configured", "subject", webPushSubject)
 	var sender delivery.Sender
 	var client *apns.Client
 	apnsErr := ""
@@ -79,7 +91,7 @@ func run() error {
 		apnsErr = "missing " + join(cfg.APNS.Missing())
 		log.Warn("apns.not_configured", "missing", cfg.APNS.Missing())
 	}
-	dispatcher := delivery.New(db, devStore, sender, log)
+	dispatcher := delivery.New(db, devStore, sender, webPushStore, webPushClient, log)
 	dispatcher.Start(ctx)
 
 	admin := auth.NewAdmin(cfg.AdminUser, cfg.AdminPassword)
@@ -93,6 +105,7 @@ func run() error {
 	srv := &api.Server{
 		Config: cfg, DB: db, Log: log, Settings: st,
 		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db),
+		WebPush: webPushStore, WebPushClient: webPushClient,
 		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
 	}
 

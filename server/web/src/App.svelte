@@ -14,7 +14,7 @@
   import { pageIn } from './lib/motion'
 
   let setupCompleted = $state<boolean | null>(null)
-  let apnsConfigured = $state<boolean | null>(null)
+  let pushReady = $state<boolean | null>(null)
   let unreachable = $state(false)
   let authRequired = $state(false)
   let needsLogin = $state(false)
@@ -32,7 +32,7 @@
       needsLogin = false
       const s = await api.status()
       setupCompleted = s.setup_completed
-      apnsConfigured = s.apns.configured
+      pushReady = (s.apns.configured && s.pushable_devices > 0) || s.web_push.subscriptions > 0
       unreachable = false
       if (!s.setup_completed && router.route.name !== 'setup') router.navigate('/setup', true)
     } catch {
@@ -71,9 +71,9 @@
         <StatusDot tone="bad">Server unreachable</StatusDot>
       {:else if needsLogin}
         <span></span>
-      {:else if apnsConfigured === false}
-        <a href="/settings" onclick={link} class="plain"><StatusDot tone="warn">APNs not configured</StatusDot></a>
-      {:else if apnsConfigured}
+      {:else if pushReady === false}
+        <a href="/settings" onclick={link} class="plain"><StatusDot tone="warn">Push not enabled</StatusDot></a>
+      {:else if pushReady}
         <StatusDot tone="ok">Push ready</StatusDot>
       {/if}
       {#if authRequired && !needsLogin}

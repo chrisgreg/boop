@@ -50,7 +50,7 @@
       const r = await api.unsilence(event.id)
       event = r.event
       deliveries = r.deliveries
-      silenceDone = r.deliveries.length ? `Pushed to ${r.deliveries.length} device${r.deliveries.length === 1 ? '' : 's'}.` : 'Unsilenced. No paired phones with push registered, so nothing was sent.'
+      silenceDone = r.deliveries.length ? `Pushed to ${r.deliveries.length} target${r.deliveries.length === 1 ? '' : 's'}.` : 'Unsilenced. No notification targets are registered, so nothing was sent.'
     } catch (e: any) {
       error = e.message
     } finally {
@@ -283,14 +283,14 @@
 
     <Card title="Push delivery">
       {#if deliveries.length === 0}
-        <div class="muted">No delivery attempts recorded. Pair a phone to receive pushes.</div>
+        <div class="muted">No delivery attempts recorded. Enable Web Push or pair a native app to receive notifications.</div>
       {:else}
         <div class="dls">
           {#each deliveries as d (d.id)}
             <div class="dl">
-              <span class="dl-n">{d.device_name || d.device_id}</span>
+              <span class="dl-n">{d.device_name || d.device_id} <span class="muted caption">· {d.transport === 'web_push' ? 'Web Push' : 'APNs'}</span></span>
               <StatusDot tone={d.status === 'sent' ? 'ok' : d.status === 'failed' ? 'bad' : 'muted'}>{d.status === 'sent' ? 'Sent' : d.status === 'failed' ? 'Failed' : 'Skipped'}</StatusDot>
-              <span class="muted caption">{d.error || d.apns_id || ''}</span>
+              <span class="muted caption">{d.error || d.apns_id || d.message_id || ''}</span>
               <span class="muted caption r">{relative(d.attempted_at)}</span>
             </div>
           {/each}

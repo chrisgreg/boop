@@ -35,8 +35,15 @@ func Handler() http.Handler {
 		if p != "/" {
 			if f, err := files.Open(p); err == nil {
 				f.Close()
+				if p == "/manifest.webmanifest" {
+					w.Header().Set("Content-Type", "application/manifest+json")
+				}
 				if strings.HasPrefix(p, "/assets/") {
 					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else {
+					// Service workers and the manifest must be revalidated so a
+					// deploy cannot strand an installed app on stale behavior.
+					w.Header().Set("Cache-Control", "no-cache")
 				}
 				server.ServeHTTP(w, r)
 				return

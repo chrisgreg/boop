@@ -13,6 +13,7 @@
   import Metric from '../lib/ui/Metric.svelte'
   import { panel, pop, reorder, soft } from '../lib/motion'
   import Skeleton from '../lib/ui/Skeleton.svelte'
+  import WebPushControl from '../lib/ui/WebPushControl.svelte'
   import { link } from '../lib/router.svelte'
 
   let status = $state<Status | null>(null)
@@ -20,7 +21,7 @@
   let projects = $state<Project[]>([])
   let error = $state('')
   let testing = $state(false)
-  let testResult = $state<{ deliveries: Delivery[]; apns_configured: boolean } | null>(null)
+  let testResult = $state<{ deliveries: Delivery[]; apns_configured: boolean; web_push_configured: boolean } | null>(null)
   let newKey = $state('')
   let testProject = $state('')
   let silences = $state<Silence[]>([])
@@ -169,6 +170,14 @@
           {/if}
         </div>
         <div>
+          <span class="k">Web Push</span>
+          {#if status.web_push.configured}
+            <StatusDot tone={status.web_push.subscriptions > 0 ? 'ok' : 'muted'}>{status.web_push.subscriptions} active subscription{status.web_push.subscriptions === 1 ? '' : 's'}</StatusDot>
+          {:else}
+            <StatusDot tone="bad">Unavailable</StatusDot>
+          {/if}
+        </div>
+        <div>
           <span class="k">Last push</span>
           {#if lastPush}
             <StatusDot tone={lastPush.status === 'sent' ? 'ok' : lastPush.status === 'failed' ? 'bad' : 'muted'}>
@@ -187,15 +196,20 @@
           {#if status.admin_auth}<StatusDot tone="ok">Enabled</StatusDot>{:else}<StatusDot tone="warn">Off · set BOOP_ADMIN_USER and BOOP_ADMIN_PASSWORD</StatusDot>{/if}
         </div>
       </div>
-      {#if !status.apns.configured}
+      {#if !status.apns.configured && status.web_push.subscriptions === 0}
         <div style="margin-top: 16px">
           <Notice tone="warn">
-            Pushes are stored but not sent. {status.apns.error ? status.apns.error + '.' : ''} Set the APNS_* environment variables and restart Boop.
+            No notification target is active. Enable Web Push below or configure APNs for a native app.
           </Notice>
         </div>
       {:else if lastPush?.status === 'failed' && lastPush.error}
         <div style="margin-top: 16px"><Notice tone="bad">Last push failed: {lastPush.error}</Notice></div>
       {/if}
+    </Card>
+
+    <Card title="Web Push">
+      <p class="secondary lead">Install Boop on your Home Screen and receive iPhone system notifications without an Apple Developer account. The VAPID identity is generated once and backed up with this SQLite database.</p>
+      <div style="margin-top: 16px"><WebPushControl onchange={load} /></div>
     </Card>
 
     <Card title="Apple Push Notifications">
@@ -212,7 +226,7 @@
     </Card>
 
     <Card title="Test Boop">
-      <p class="secondary lead">Creates a test event and pushes it to every paired phone.</p>
+      <p class="secondary lead">Creates a test event and sends it to every active native and Web Push target.</p>
       <div class="row" style="margin-top: 12px; flex-wrap: wrap">
         <Select bind:value={testProject} options={[{ value: '', label: projects.length ? `Project: ${projects[projects.length - 1]?.name}` : 'No project yet' }, ...projects.map((p) => ({ value: p.id, label: p.name }))]} style="width: 220px" aria-label="Project" />
         <Button onclick={sendTest} disabled={testing || projects.length === 0}>{testing ? 'Sending' : 'Send test notification'}</Button>
@@ -220,15 +234,13 @@
       {#if testResult}
         <div style="margin-top: 16px" transition:panel>
           {#if testResult.deliveries.length === 0}
-            <Notice tone="info">Event created. No paired phones with push registered, so nothing was sent.</Notice>
-          {:else if !testResult.apns_configured}
-            <Notice tone="warn">Event created, but APNs is not configured so {testResult.deliveries.length} delivery{testResult.deliveries.length === 1 ? ' was' : 'ies were'} skipped.</Notice>
+            <Notice tone="info">Event created. No notification targets are registered, so nothing was sent.</Notice>
           {:else if testResult.deliveries.every((d) => d.status === 'sent')}
-            <Notice tone="good">Sent to {testResult.deliveries.length} device{testResult.deliveries.length === 1 ? '' : 's'}.</Notice>
+            <Notice tone="good">Sent to {testResult.deliveries.length} target{testResult.deliveries.length === 1 ? '' : 's'}.</Notice>
           {:else}
             <Notice tone="bad">
               {#each testResult.deliveries.filter((d) => d.status !== 'sent') as d (d.id)}
-                <div>{d.device_name}: {d.error}</div>
+                <div>{d.device_name || d.transport}: {d.error}</div>
               {/each}
             </Notice>
           {/if}
