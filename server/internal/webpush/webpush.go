@@ -4,7 +4,9 @@ package webpush
 
 import (
 	"context"
+	"crypto/elliptic"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	pushlib "github.com/marknefedov/go-webpush/v2"
+	pushlib "github.com/SherClockHolmes/webpush-go"
 
 	"github.com/chrisgreg/boop/server/internal/ids"
 )
@@ -79,19 +81,25 @@ type Store struct {
 	db *sql.DB
 }
 
+type vapidKeys struct {
+	PublicKey  string `json:"publicKey"`
+	PrivateKey string `json:"privateKey"`
+}
+
 // NewStore returns a Web Push store.
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
 
 // LoadOrCreateVAPIDKeys returns the server's stable VAPID identity. The
 // private key is generated once and retained by normal database backups.
-func (s *Store) LoadOrCreateVAPIDKeys(ctx context.Context) (*pushlib.VAPIDKeys, error) {
+func (s *Store) LoadOrCreateVAPIDKeys(ctx context.Context) (*vapidKeys, error) {
 	var raw string
 	err := s.db.QueryRowContext(ctx, `SELECT keys_json FROM web_push_configuration WHERE id = 1`).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		keys, err := pushlib.GenerateVAPIDKeys()
+		privateKey, publicKey, err := pushlib.GenerateVAPIDKeys()
 		if err != nil {
 			return nil, fmt.Errorf("generate VAPID keys: %w", err)
 		}
+		keys := vapidKeys{PublicKey: publicKey, PrivateKey: privateKey}
 		body, err := json.Marshal(keys)
 		if err != nil {
 			return nil, fmt.Errorf("encode VAPID keys: %w", err)
@@ -105,9 +113,12 @@ func (s *Store) LoadOrCreateVAPIDKeys(ctx context.Context) (*pushlib.VAPIDKeys, 
 	} else if err != nil {
 		return nil, fmt.Errorf("load VAPID keys: %w", err)
 	}
-	var keys pushlib.VAPIDKeys
+	var keys vapidKeys
 	if err := json.Unmarshal([]byte(raw), &keys); err != nil {
 		return nil, fmt.Errorf("decode VAPID keys: %w", err)
+	}
+	if keys.PublicKey == "" || keys.PrivateKey == "" {
+		return nil, errors.New("decode VAPID keys: public and private keys are required")
 	}
 	return &keys, nil
 }
@@ -152,10 +163,32 @@ func validate(in Input, userAgent string) error {
 	if len(userAgent) > maxUserAgent {
 		return fmt.Errorf("%w: user agent must be at most %d characters", ErrInvalid, maxUserAgent)
 	}
-	if _, err := pushlib.DecodeSubscriptionKeys(in.Keys.Auth, in.Keys.P256DH); err != nil {
+	if err := validateSubscriptionKeys(in.Keys); err != nil {
 		return fmt.Errorf("%w: invalid subscription keys: %v", ErrInvalid, err)
 	}
 	return nil
+}
+
+func validateSubscriptionKeys(keys Keys) error {
+	auth, err := decodeSubscriptionKey(keys.Auth)
+	if err != nil || len(auth) == 0 {
+		return errors.New("auth key is not valid base64url")
+	}
+	p256dh, err := decodeSubscriptionKey(keys.P256DH)
+	if err != nil {
+		return errors.New("p256dh key is not valid base64url")
+	}
+	if x, _ := elliptic.Unmarshal(elliptic.P256(), p256dh); x == nil {
+		return errors.New("p256dh key is not a valid P-256 point")
+	}
+	return nil
+}
+
+func decodeSubscriptionKey(value string) ([]byte, error) {
+	if decoded, err := base64.RawURLEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	return base64.StdEncoding.DecodeString(value)
 }
 
 // List returns all active browser subscriptions.
@@ -215,8 +248,8 @@ func scanSubscription(row scanner) (Subscription, error) {
 
 // Client sends encrypted notifications through browser push services.
 type Client struct {
-	client  *pushlib.Client
-	keys    *pushlib.VAPIDKeys
+	client  pushlib.HTTPClient
+	keys    *vapidKeys
 	subject string
 }
 
@@ -230,46 +263,47 @@ func NewClient(ctx context.Context, store *Store, subject string) (*Client, erro
 		subject = "mailto:boop@localhost"
 	}
 	return &Client{
-		client:  pushlib.NewClient(pushlib.Config{HTTPClient: &http.Client{Timeout: 10 * time.Second}}),
+		client:  &http.Client{Timeout: 10 * time.Second},
 		keys:    keys,
 		subject: subject,
 	}, nil
 }
 
 // PublicKey is safe to expose to the browser when subscribing.
-func (c *Client) PublicKey() string { return c.keys.PublicKeyString() }
+func (c *Client) PublicKey() string { return c.keys.PublicKey }
 
 // Send encrypts and sends one notification.
 func (c *Client) Send(ctx context.Context, sub Subscription, n Notification) (string, error) {
-	keys, err := pushlib.DecodeSubscriptionKeys(sub.Auth, sub.P256DH)
-	if err != nil {
-		return "", fmt.Errorf("decode subscription keys: %w", err)
-	}
 	body, err := marshalNotification(n)
 	if err != nil {
 		return "", err
 	}
-	result, err := c.client.Send(ctx, body, &pushlib.Subscription{Endpoint: sub.Endpoint, Keys: keys}, pushlib.SendOptions{
-		Subject:   c.subject,
-		VAPIDKeys: c.keys,
-		TTL:       defaultTTL,
-		Urgency:   urgency(n.Level),
-		Topic:     topic(n.EventID),
+	response, err := pushlib.SendNotificationWithContext(ctx, body, &pushlib.Subscription{
+		Endpoint: sub.Endpoint,
+		Keys:     pushlib.Keys{Auth: sub.Auth, P256dh: sub.P256DH},
+	}, &pushlib.Options{
+		HTTPClient:      c.client,
+		Subscriber:      c.subject,
+		VAPIDPublicKey:  c.keys.PublicKey,
+		VAPIDPrivateKey: c.keys.PrivateKey,
+		TTL:             defaultTTL,
+		Urgency:         urgency(n.Level),
+		Topic:           topic(n.EventID),
 	})
-	if result != nil && result.Response != nil {
-		result.Response.Body.Close()
-	}
 	if err != nil {
-		var serviceErr *pushlib.PushServiceError
-		if errors.As(err, &serviceErr) && serviceErr.SubscriptionExpired {
-			return "", fmt.Errorf("%w: %v", ErrSubscriptionExpired, err)
-		}
 		return "", err
 	}
-	if result.MessageURL != "" {
-		return result.MessageURL, nil
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
+		return "", fmt.Errorf("%w: push service returned HTTP %d", ErrSubscriptionExpired, response.StatusCode)
 	}
-	return fmt.Sprintf("HTTP %d", result.StatusCode), nil
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("push service returned HTTP %d", response.StatusCode)
+	}
+	if location, err := response.Location(); err == nil {
+		return location.String(), nil
+	}
+	return fmt.Sprintf("HTTP %d", response.StatusCode), nil
 }
 
 func marshalNotification(n Notification) ([]byte, error) {

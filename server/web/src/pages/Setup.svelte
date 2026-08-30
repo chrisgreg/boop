@@ -7,14 +7,14 @@
   import CodeBlock from '../lib/ui/CodeBlock.svelte'
   import StatusDot from '../lib/ui/StatusDot.svelte'
   import Notice from '../lib/ui/Notice.svelte'
-  import WebPushControl from '../lib/ui/WebPushControl.svelte'
+  import Devices from './Devices.svelte'
   import { fly } from 'svelte/transition'
   import { cubicOut } from 'svelte/easing'
   import { dur, panel } from '../lib/motion'
 
   let { onfinished }: { onfinished: () => void } = $props()
 
-  const STEPS = ['Server', 'Web Push', 'First project', 'Test Boop']
+  const STEPS = ['Server', 'Apple Push Notifications', 'iPhone', 'First project', 'Test Boop']
   let step = $state(0)
   let status = $state<Status | null>(null)
   let error = $state('')
@@ -22,10 +22,12 @@
   let created = $state<ProjectCreated | null>(null)
   let testing = $state(false)
   let testMsg = $state('')
+  let paired = $state(false)
 
   async function refresh() {
     try {
       status = await api.status()
+      paired = (status?.pushable_devices ?? 0) > 0 || (status?.devices ?? 0) > 0
     } catch (e: any) {
       error = e.message
     }
@@ -49,8 +51,9 @@
     testMsg = ''
     try {
       const r = await api.test()
-      if (r.deliveries.length === 0) testMsg = 'Event created. No notification target is registered yet, so nothing was sent.'
-      else if (r.deliveries.every((d) => d.status === 'sent')) testMsg = `Sent to ${r.deliveries.length} target${r.deliveries.length === 1 ? '' : 's'}. Check your notifications.`
+      if (r.deliveries.length === 0) testMsg = 'Event created. No phone with push registered yet, so nothing was sent.'
+      else if (!r.apns_configured) testMsg = 'Event created, but APNs is not configured so the push was skipped.'
+      else if (r.deliveries.every((d) => d.status === 'sent')) testMsg = `Sent to ${r.deliveries.length} device${r.deliveries.length === 1 ? '' : 's'}. Check your phone.`
       else testMsg = 'Push failed: ' + r.deliveries.map((d) => d.error).join('; ')
     } catch (e: any) {
       testMsg = e.message
@@ -98,14 +101,36 @@
         <div><span class="k">Version</span><span>{status?.version ?? '—'}</span></div>
       </div>
       <p class="lead secondary" style="margin-top: 16px">Your phone must be able to reach the base URL over HTTPS. If it shows a local address, set BOOP_BASE_URL to your public address and put Boop behind your reverse proxy.</p>
-      <p class="lead secondary">Back up the database file to retain events, subscriptions and the Web Push identity. An optional APNs key is backed up separately.</p>
+      <p class="lead secondary">Back up by copying the database file. The APNs key should be backed up separately.</p>
     </Card>
   {:else if step === 1}
-    <Card title="Web Push on iPhone">
-      <p class="lead secondary">Boop uses the web standard supported by iPhone Home Screen apps. It does not require an Apple Developer account.</p>
-      <div style="margin-top: 16px"><WebPushControl onchange={refresh} /></div>
+    <Card title="Apple Push Notifications">
+      {#if status?.apns.configured}
+        <StatusDot tone="ok">Configured · {status.apns.bundle_id} · {status.apns.environment}</StatusDot>
+      {:else}
+        <StatusDot tone="warn">Not configured{status?.apns.error ? ` · ${status.apns.error}` : ''}</StatusDot>
+        <p class="lead secondary" style="margin-top: 12px">Boop works without this, but pushes are skipped until it is set. You can come back later.</p>
+      {/if}
+      <ol class="howto">
+        <li>Sign in to the Apple Developer portal and create an App identifier for the Boop app.</li>
+        <li>Enable the Push Notifications capability on it.</li>
+        <li>Under Keys, create an Apple Push Notifications service (APNs) key and download the .p8 file. It can only be downloaded once.</li>
+        <li>Note the Team id (top right of the portal) and the Key id shown next to the key.</li>
+        <li>Use the same bundle identifier in Xcode when you build the iOS app.</li>
+        <li>Mount the .p8 into the container and set the environment below, then restart Boop.</li>
+      </ol>
+      <CodeBlock code={`APNS_TEAM_ID=YOUR_TEAM_ID\nAPNS_KEY_ID=YOUR_KEY_ID\nAPNS_BUNDLE_ID=com.example.Boop\nAPNS_PRIVATE_KEY_PATH=/run/secrets/apns.p8`} />
+      <div class="actions"><Button variant="secondary" size="sm" onclick={refresh}>Re-check</Button></div>
     </Card>
   {:else if step === 2}
+    <Card title="iPhone">
+      <p class="lead secondary">Build the open-source Boop iOS app with your own Apple team and bundle identifier, install it on your phone, then pair it here.</p>
+      {#if paired}
+        <div style="margin-top: 12px"><StatusDot tone="ok">{status?.devices} device{status?.devices === 1 ? '' : 's'} paired</StatusDot></div>
+      {/if}
+    </Card>
+    <Devices embedded onpaired={refresh} />
+  {:else if step === 3}
     <Card title="First project">
       {#if created}
         <p class="lead secondary">Copy this API key now. It is shown once.</p>
@@ -172,6 +197,8 @@
   .facts span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .k { font: var(--up-type-caption); color: var(--up-text-muted); }
   .lead { font: var(--up-type-meta); line-height: 1.6; margin-top: 8px; }
+  .howto { font: var(--up-type-meta); color: var(--up-text-secondary); line-height: 1.7; padding-left: 20px; margin: 12px 0 16px; }
+  .actions { display: flex; justify-content: flex-end; margin-top: 12px; }
   .nav { display: flex; gap: var(--up-space-3); align-items: center; }
   .spacer { flex: 1; }
 </style>

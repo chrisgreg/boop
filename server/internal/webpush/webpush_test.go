@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	pushlib "github.com/marknefedov/go-webpush/v2"
-
 	"github.com/chrisgreg/boop/server/internal/database"
 )
 
@@ -44,7 +42,7 @@ func TestVAPIDIdentitySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Equal(second) {
+	if *first != *second {
 		t.Fatal("VAPID identity changed after reopening the database")
 	}
 }
@@ -110,7 +108,7 @@ func TestClientSendAndExpiredClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &Client{
-		client:  pushlib.NewClient(pushlib.Config{HTTPClient: pushService.Client()}),
+		client:  pushService.Client(),
 		keys:    keys,
 		subject: pushService.URL,
 	}

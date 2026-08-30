@@ -11,7 +11,7 @@
 
 A tiny, self-hosted notification inbox for developers. Something happened in one of your apps; Boop tells you on your phone.
 
-One Go binary, one SQLite file, one Docker container. Pushes go straight from your server through standards-based Web Push or optional APNs. There is no hosted relay, account system, or telemetry.
+One Go binary, one SQLite file, one Docker container. Pushes go straight from your server to Apple's APNs. There is no hosted relay, account system, or telemetry.
 
 </p>
 
@@ -25,17 +25,17 @@ curl https://boop.example.com/api/v1/events \
 ## Architecture
 
 <p align="center">
-  <img src="docs/architecture.png" width="900" alt="How Boop works: apps POST events to the Go server, which stores them in SQLite and fans notifications out through Web Push and optional APNs." />
+  <img src="docs/architecture.png" width="900" alt="How Boop works: apps POST events to the Go server, which stores them in SQLite and pushes to APNs; the iOS app fetches full detail from the server; the web UI manages projects and shows the pairing QR." />
 </p>
 
-Your apps POST events with a project API key. The Go server redacts and stores them in SQLite, then fans notifications out through Web Push and, when configured, Apple's APNs. The installed web app opens the same-origin event detail; the native iOS app fetches full detail with its own device credential. The embedded web UI manages projects, notification targets and devices. An interactive version lives in [`docs/architecture/index.html`](docs/architecture/index.html) (open it locally; the source is `boop.architecture.json`).
+Your apps POST events with a project API key. The Go server redacts and stores them in SQLite, then pushes straight to Apple's APNs using your `.p8` key. The push carries only the title, body and event id; the iOS app fetches the full event from your server with its own device credential. The embedded web UI manages projects and devices and shows the pairing QR the phone scans. An interactive version lives in [`docs/architecture/index.html`](docs/architecture/index.html) (open it locally; the source is `boop.architecture.json`).
 
 ## What is in the box
 
 | Part | Where |
 | --- | --- |
 | Go server (API, SQLite, APNs, embedded web UI) | `server/` |
-| Installable Web UI / PWA (Svelte, built into the binary) | `server/web/` |
+| Web UI (Svelte, built into the binary) | `server/web/` |
 | iOS app (SwiftUI, iOS 26, you build and sign it) + notification service extension | `ios/` — see [ios/README.md](ios/README.md) |
 | Client libraries | separate repos — see [Integrations](#integrations) |
 | Native desktop client | planned |
@@ -50,9 +50,9 @@ docker compose up -d --build
 open http://localhost:8080
 ```
 
-The first visit opens a setup wizard: server check, Web Push, first project, test notification. On iPhone, serve Boop over HTTPS, add it to the Home Screen, open the new icon, and explicitly enable notifications. No Apple Developer account is required. APNs remains optional for the native app.
+The first visit opens a setup wizard: server check, APNs, pairing, first project, test notification. APNs credentials are optional; without them events are stored and shown in the UI but pushes are skipped, and the settings page says so.
 
-Data lives in `./data/boop.db`. Back up by copying that file (use `sqlite3 data/boop.db ".backup backup.db"` for a consistent copy while running). The VAPID identity is generated once and included in this database; back up an optional APNs `.p8` key separately.
+Data lives in `./data/boop.db`. Back up by copying that file (use `sqlite3 data/boop.db ".backup backup.db"` for a consistent copy while running). Back up your `.p8` key separately.
 
 ## Send an event
 
@@ -243,17 +243,7 @@ Any client that supports Streamable HTTP with a custom header can connect the sa
 | `APNS_PRIVATE_KEY` | | Alternative: the `.p8` contents, as PEM text or base64 (`base64 -i key.p8 \| tr -d '\n'`) |
 | `APNS_ENVIRONMENT` | `production` | `sandbox` for Xcode debug builds |
 
-## Web Push on iPhone
-
-1. Deploy Boop at a public HTTPS URL and set `BOOP_BASE_URL` to it.
-2. Open that URL in Safari on iOS 16.4 or newer and sign in.
-3. Choose **Share → Add to Home Screen**.
-4. Open Boop from its Home Screen icon and select **Enable notifications** in setup or Settings.
-5. Send a test notification. iOS presents it on the Lock Screen and in Notification Center according to the device's Focus settings.
-
-Boop generates its VAPID keypair once and stores it in SQLite. Restarts keep existing subscriptions valid; restoring the database restores the same push identity. An expired browser subscription is removed automatically after a push service returns HTTP 404 or 410.
-
-## Optional native Apple setup
+## Apple setup
 
 1. In the Apple Developer portal, create an App identifier for your Boop iOS build and enable Push Notifications.
 2. Under Keys, create an APNs authentication key. Download the `.p8` (only possible once). Note the Key id.
@@ -262,6 +252,18 @@ Boop generates its VAPID keypair once and stores it in SQLite. Restarts keep exi
 5. Restart: `docker compose up -d`. Settings should show APNs as configured.
 6. Build the iOS app (`open ios/Boop.xcodeproj`, set your team and the same bundle id — see [ios/README.md](ios/README.md)), install it on your phone, open Devices → Pair iPhone, and scan the QR.
 7. Settings → Send test notification.
+
+## Web Push on iPhone
+
+1. Deploy Boop at a public HTTPS URL and set `BOOP_BASE_URL` to it.
+2. Open that URL in Safari on iOS 16.4 or newer and sign in.
+3. Choose **Share → Add to Home Screen**.
+4. Open Boop from its Home Screen icon and select **Enable notifications** in Settings.
+5. Send a test notification. iOS presents it on the Lock Screen and in Notification Center according to the device's Focus settings.
+
+Boop generates its VAPID keypair once and stores it in SQLite. Restarts keep existing subscriptions valid; restoring the database restores the same push identity. An expired browser subscription is removed automatically after a push service returns HTTP 404 or 410.
+
+iOS Home Screen apps keep storage separate from Safari. If admin authentication is enabled, sign in again after opening the installed Home Screen app. Set `BOOP_BASE_URL` to the public HTTPS origin; when it is unset or not HTTPS, the VAPID subject falls back to `mailto:boop@localhost`.
 
 ## Deploying with Dokploy (or any compose host)
 

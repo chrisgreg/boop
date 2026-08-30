@@ -14,7 +14,8 @@
   import { pageIn } from './lib/motion'
 
   let setupCompleted = $state<boolean | null>(null)
-  let pushReady = $state<boolean | null>(null)
+  let apnsConfigured = $state<boolean | null>(null)
+  let webPushSubscriptions = $state(0)
   let unreachable = $state(false)
   let authRequired = $state(false)
   let needsLogin = $state(false)
@@ -32,7 +33,8 @@
       needsLogin = false
       const s = await api.status()
       setupCompleted = s.setup_completed
-      pushReady = (s.apns.configured && s.pushable_devices > 0) || s.web_push.subscriptions > 0
+      apnsConfigured = s.apns.configured
+      webPushSubscriptions = s.web_push.subscriptions
       unreachable = false
       if (!s.setup_completed && router.route.name !== 'setup') router.navigate('/setup', true)
     } catch {
@@ -71,10 +73,13 @@
         <StatusDot tone="bad">Server unreachable</StatusDot>
       {:else if needsLogin}
         <span></span>
-      {:else if pushReady === false}
-        <a href="/settings" onclick={link} class="plain"><StatusDot tone="warn">Push not enabled</StatusDot></a>
-      {:else if pushReady}
+      {:else if apnsConfigured === false}
+        <a href="/settings" onclick={link} class="plain"><StatusDot tone="warn">APNs not configured</StatusDot></a>
+      {:else if apnsConfigured}
         <StatusDot tone="ok">Push ready</StatusDot>
+      {/if}
+      {#if !unreachable && !needsLogin && webPushSubscriptions > 0}
+        <a href="/settings" onclick={link} class="plain"><StatusDot tone="ok">Web Push ready</StatusDot></a>
       {/if}
       {#if authRequired && !needsLogin}
         <button type="button" class="signout" onclick={signOut}>Sign out</button>
