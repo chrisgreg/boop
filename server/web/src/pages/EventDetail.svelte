@@ -281,16 +281,16 @@
       {/if}
     </Card>
 
-    <Card title="Push delivery">
+    <Card title="Delivery">
       {#if deliveries.length === 0}
-        <div class="muted">No delivery attempts recorded. Pair a phone to receive pushes.</div>
+        <div class="muted">No delivery attempts recorded.</div>
       {:else}
         <div class="dls">
           {#each deliveries as d (d.id)}
             <div class="dl">
-              <span class="dl-n">{d.device_name || d.device_id}</span>
+              <span class="dl-n">{d.target_type === 'webhook' ? `Webhook · ${d.webhook_host}` : d.device_name || d.device_id}</span>
               <StatusDot tone={d.status === 'sent' ? 'ok' : d.status === 'failed' ? 'bad' : 'muted'}>{d.status === 'sent' ? 'Sent' : d.status === 'failed' ? 'Failed' : 'Skipped'}</StatusDot>
-              <span class="muted caption">{d.error || d.apns_id || ''}</span>
+              <span class="muted caption">{d.error || d.apns_id || (d.http_status ? `HTTP ${d.http_status}` : '')}</span>
               <span class="muted caption r">{relative(d.attempted_at)}</span>
             </div>
           {/each}

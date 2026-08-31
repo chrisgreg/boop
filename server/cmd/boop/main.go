@@ -27,6 +27,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
 	"github.com/chrisgreg/boop/server/internal/web"
+	"github.com/chrisgreg/boop/server/internal/webhooks"
 )
 
 func main() {
@@ -79,7 +80,9 @@ func run() error {
 		apnsErr = "missing " + join(cfg.APNS.Missing())
 		log.Warn("apns.not_configured", "missing", cfg.APNS.Missing())
 	}
+	webhookStore := webhooks.New(db)
 	dispatcher := delivery.New(db, devStore, sender, log)
+	dispatcher.ConfigureWebhooks(webhookStore, nil)
 	dispatcher.Start(ctx)
 
 	admin := auth.NewAdmin(cfg.AdminUser, cfg.AdminPassword)
@@ -92,7 +95,7 @@ func run() error {
 	evStore := events.New(db)
 	srv := &api.Server{
 		Config: cfg, DB: db, Log: log, Settings: st,
-		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db),
+		Projects: projects.New(db), Devices: devStore, Pairing: pairing.New(db, devStore), Events: evStore, Silences: silences.New(db), Webhooks: webhookStore,
 		Dispatcher: dispatcher, APNS: client, APNSError: apnsErr, Admin: admin, StartedAt: time.Now(), Web: web.Handler(),
 	}
 

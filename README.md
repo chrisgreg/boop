@@ -213,6 +213,38 @@ The part before `@` is a Boop project's API key; the host is your Boop server; t
 
 Each Sentry event becomes a Boop event: the exception `Type: value` (or the message) is the title; the body carries the culprit, top stack frame and `env`/`release`; levels map `fatal→critical`, `error`, `warning`, `info`/`debug→info`; `source` is `sentry`; and Sentry's grouping fingerprint is preserved so [silence rules](#api) work per error group. Full event context (platform, tags, top frames) is kept in the event's `data` and redacted like any other event. Transactions, sessions and other non-error items are accepted and ignored.
 
+## Webhooks
+
+Each project can also send events to any HTTP webhook — useful for Slack, Discord, Teams, n8n, Zapier, or your own service. Configure targets in **Projects → Settings → Webhooks**. Webhooks send independently of the phone-notification toggle; use a silence rule when you need to stop all outbound channels.
+
+The default **Native JSON** payload is:
+
+```json
+{
+  "id": "evt_...", "title": "Deploy failed", "body": "api returned 500",
+  "level": "error", "source": "deploy", "fingerprint": "api-500",
+  "created_at": "2026-08-31T12:00:00Z",
+  "project": {"id": "prj_...", "name": "Production"},
+  "actions": [], "data": {}
+}
+```
+
+For services with their own shape, select **Custom template**. Templates receive those same fields and offer a `json` helper that safely quotes a value. The built-in presets are copy-paste ready:
+
+```json
+// Slack
+{"text": {{json .Title}}}
+
+// Discord
+{"content": {{json .Title}}}
+```
+
+`{{json .Field}}` emits its own surrounding quotes, so write `{"text": {{json .Title}}}`, not `{"text": "{{json .Title}}"}` — wrapping it in quotes produces invalid JSON. A template that renders invalid JSON is still sent; the receiver rejects it and the attempt is recorded as `failed`.
+
+Additional headers are merged with the default `Content-Type: application/json`; a configured `Content-Type` wins. Header values are write-only and are masked after saving. A webhook URL is a credential for many services, so deliveries show only its host, never its full URL.
+
+> **Trust and SSRF note.** Webhook URLs can reach any network address visible to the Boop server, including private services. Only configure targets you trust; webhook configuration is admin-only and carries the same trust boundary as APNs credentials. Network allowlists and private-address blocking are not yet implemented.
+
 ### Anything else
 
 `curl` is a first-class client (see [Send an event](#send-an-event)), and [`integration-llms.md`](integration-llms.md) is a prompt you can hand to an LLM to generate a client for any other language that behaves like the ones above.
@@ -232,6 +264,9 @@ All endpoints are under `/api/v1` (except the Sentry envelope endpoint). Errors 
 | GET/POST | `/api/v1/projects` | admin | List / create (returns `api_key` once) |
 | GET/PATCH/DELETE | `/api/v1/projects/:id` | admin | Manage |
 | POST | `/api/v1/projects/:id/rotate-key` | admin | New key, old one stops working |
+| GET/POST | `/api/v1/projects/:id/webhooks` | admin | List / create webhook targets |
+| PATCH/DELETE | `/api/v1/projects/:id/webhooks/:webhook_id` | admin | Update / remove a webhook target |
+| POST | `/api/v1/projects/:id/webhooks/:webhook_id/test` | admin | Send a synthetic test webhook (not stored as an event delivery) |
 | POST | `/api/v1/pairing` | admin | One-time pairing token + QR payload (10 min, single use) |
 | DELETE | `/api/v1/pairing/:id` | admin | Revoke |
 | POST | `/api/v1/pairing/exchange` | none | `{token, name, platform}` → `{device, credential}` |

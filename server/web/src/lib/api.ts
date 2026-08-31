@@ -84,12 +84,40 @@ export interface Device {
 export interface Delivery {
   id: string
   event_id: string
-  device_id: string
-  device_name: string
+  device_id?: string
+  device_name?: string
+  target_type: 'device' | 'webhook'
+  webhook_id?: string
+  webhook_host?: string
   status: 'sent' | 'failed' | 'skipped'
   apns_id?: string
+  http_status?: number
   error?: string
   attempted_at: string
+}
+
+export type WebhookPayloadMode = 'json' | 'custom'
+
+export interface Webhook {
+  id: string
+  project_id: string
+  url: string
+  payload_mode: WebhookPayloadMode
+  body_template: string
+  headers: Record<string, string>
+  min_level: Level | ''
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface WebhookInput {
+  url?: string
+  payload_mode?: WebhookPayloadMode
+  body_template?: string
+  headers?: Record<string, string>
+  min_level?: Level | ''
+  enabled?: boolean
 }
 
 export interface PairingToken {
@@ -197,6 +225,11 @@ export const api = {
     request<Project>('PATCH', `/api/v1/projects/${id}`, patch),
   deleteProject: (id: string) => request<void>('DELETE', `/api/v1/projects/${id}`),
   rotateKey: (id: string) => request<ProjectCreated>('POST', `/api/v1/projects/${id}/rotate-key`),
+  webhooks: (projectId: string) => request<{ webhooks: Webhook[] }>('GET', `/api/v1/projects/${projectId}/webhooks`),
+  createWebhook: (projectId: string, input: WebhookInput) => request<Webhook>('POST', `/api/v1/projects/${projectId}/webhooks`, input),
+  updateWebhook: (projectId: string, id: string, patch: WebhookInput) => request<Webhook>('PATCH', `/api/v1/projects/${projectId}/webhooks/${id}`, patch),
+  deleteWebhook: (projectId: string, id: string) => request<void>('DELETE', `/api/v1/projects/${projectId}/webhooks/${id}`),
+  testWebhook: (projectId: string, id: string) => request<{ delivery: Delivery }>('POST', `/api/v1/projects/${projectId}/webhooks/${id}/test`),
 
   devices: () => request<{ devices: Device[] }>('GET', '/api/v1/devices'),
   updateDevice: (id: string, patch: { name?: string }) => request<Device>('PATCH', `/api/v1/devices/${id}`, patch),

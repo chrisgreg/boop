@@ -25,6 +25,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/webhooks"
 )
 
 // fakeSender records notifications instead of talking to APNs.
@@ -63,6 +64,9 @@ func newEnv(t *testing.T) *env {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dev := devices.New(db)
 	sender := &fakeSender{}
+	webhookStore := webhooks.New(db)
+	dispatcher := delivery.New(db, dev, sender, log)
+	dispatcher.ConfigureWebhooks(webhookStore, nil)
 	s := &Server{
 		Config:     config.Config{DatabasePath: "test.db", RetentionDays: 30, APNS: config.APNS{Environment: "sandbox"}},
 		DB:         db,
@@ -73,7 +77,8 @@ func newEnv(t *testing.T) *env {
 		Pairing:    pairing.New(db, dev),
 		Events:     events.New(db),
 		Silences:   silences.New(db),
-		Dispatcher: delivery.New(db, dev, sender, log),
+		Webhooks:   webhookStore,
+		Dispatcher: dispatcher,
 		Admin:      auth.NewAdmin("", ""),
 		StartedAt:  time.Now(),
 	}
@@ -619,6 +624,69 @@ func TestDeliveryFanOut(t *testing.T) {
 	}
 	if r.body["apns"].(map[string]any)["configured"] != false {
 		t.Errorf("apns should report unconfigured in tests: %s", r.raw)
+	}
+}
+
+func TestProjectWebhookCRUDAndTestSend(t *testing.T) {
+	e := newEnv(t)
+	projectID, _ := e.createProject("Alerts")
+	otherID, _ := e.createProject("Other")
+	if r := e.do("POST", "/api/v1/projects/"+projectID+"/webhooks", "", map[string]any{"url": "/relative"}); r.status != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid webhook: %d %s", r.status, r.raw)
+	}
+	called := make(chan struct{}, 1)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called <- struct{}{}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer receiver.Close()
+
+	r := e.do("POST", "/api/v1/projects/"+projectID+"/webhooks", "", map[string]any{
+		"url": receiver.URL, "headers": map[string]string{"Authorization": "Bearer secret"},
+	})
+	if r.status != http.StatusCreated {
+		t.Fatalf("create webhook: %d %s", r.status, r.raw)
+	}
+	webhookID := r.body["id"].(string)
+	if r.body["headers"].(map[string]any)["Authorization"] != "********" {
+		t.Fatalf("headers should be masked: %s", r.raw)
+	}
+
+	r = e.do("GET", "/api/v1/projects/"+projectID+"/webhooks", "", nil)
+	if r.status != http.StatusOK || len(r.body["webhooks"].([]any)) != 1 {
+		t.Fatalf("list webhooks: %d %s", r.status, r.raw)
+	}
+	if r = e.do("PATCH", "/api/v1/projects/"+otherID+"/webhooks/"+webhookID, "", map[string]any{"enabled": false}); r.status != http.StatusNotFound {
+		t.Fatalf("cross-project webhook update: %d %s", r.status, r.raw)
+	}
+
+	var before int
+	if err := e.server.DB.QueryRow(`SELECT COUNT(*) FROM deliveries`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	r = e.do("POST", "/api/v1/projects/"+projectID+"/webhooks/"+webhookID+"/test", "", nil)
+	if r.status != http.StatusOK || r.body["delivery"].(map[string]any)["http_status"] != float64(http.StatusAccepted) {
+		t.Fatalf("test webhook: %d %s", r.status, r.raw)
+	}
+	select {
+	case <-called:
+	default:
+		t.Fatal("test webhook did not send")
+	}
+	var after int
+	if err := e.server.DB.QueryRow(`SELECT COUNT(*) FROM deliveries`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("test webhook should not record a delivery: %d -> %d", before, after)
+	}
+
+	r = e.do("PATCH", "/api/v1/projects/"+projectID+"/webhooks/"+webhookID, "", map[string]any{"enabled": false})
+	if r.status != http.StatusOK || r.body["enabled"] != false {
+		t.Fatalf("update webhook: %d %s", r.status, r.raw)
+	}
+	if r = e.do("DELETE", "/api/v1/projects/"+projectID+"/webhooks/"+webhookID, "", nil); r.status != http.StatusNoContent {
+		t.Fatalf("delete webhook: %d %s", r.status, r.raw)
 	}
 }
 

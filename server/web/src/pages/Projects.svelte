@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, LEVELS, type Project, type ProjectCreated } from '../lib/api'
+  import { api, LEVELS, type Level, type Project, type ProjectCreated, type Webhook, type WebhookInput, type WebhookPayloadMode } from '../lib/api'
   import { LEVEL_LABEL } from '../lib/levels'
   import { relative } from '../lib/format'
   import Card from '../lib/ui/Card.svelte'
@@ -15,6 +15,7 @@
   import IconPicker from '../lib/ui/IconPicker.svelte'
   import { panel, soft, pop, reorder } from '../lib/motion'
   import Skeleton from '../lib/ui/Skeleton.svelte'
+  import { webhookPresets } from '../lib/webhookPresets'
 
   let projects = $state<Project[]>([])
   let loaded = $state(false)
@@ -24,6 +25,15 @@
   let revealed = $state<ProjectCreated | null>(null)
   let editing = $state<string | null>(null)
   let confirmDelete = $state<string | null>(null)
+  let webhooks = $state<Webhook[]>([])
+  let editingWebhook = $state<string | null>(null)
+  let webhookURL = $state('')
+  let webhookMode = $state<WebhookPayloadMode>('json')
+  let webhookTemplate = $state('')
+  let webhookHeaders = $state('{}')
+  let webhookMinLevel = $state<Level | ''>('')
+  let webhookEnabled = $state(true)
+  let webhookResult = $state('')
 
   async function load() {
     try {
@@ -80,7 +90,102 @@
     }
   }
 
+  async function toggleSettings(p: Project) {
+    if (editing === p.id) {
+      editing = null
+      return
+    }
+    editing = p.id
+    await loadWebhooks(p.id)
+  }
+
+  async function loadWebhooks(projectID: string) {
+    try {
+      webhooks = (await api.webhooks(projectID)).webhooks
+    } catch (e: any) {
+      error = e.message
+    }
+  }
+
+  function resetWebhookForm() {
+    editingWebhook = null
+    webhookURL = ''
+    webhookMode = 'json'
+    webhookTemplate = ''
+    webhookHeaders = '{}'
+    webhookMinLevel = ''
+    webhookEnabled = true
+    webhookResult = ''
+  }
+
+  function editWebhook(w: Webhook) {
+    editingWebhook = w.id
+    webhookURL = w.url
+    webhookMode = w.payload_mode
+    webhookTemplate = w.body_template
+    webhookHeaders = JSON.stringify(w.headers, null, 2)
+    webhookMinLevel = w.min_level
+    webhookEnabled = w.enabled
+    webhookResult = ''
+  }
+
+  function applyPreset(name: keyof typeof webhookPresets) {
+    const preset = webhookPresets[name]
+    webhookMode = preset.payload_mode
+    webhookTemplate = preset.body_template
+    webhookHeaders = preset.headers
+  }
+
+  function webhookInput(): WebhookInput | null {
+    const input: WebhookInput = {
+      url: webhookURL.trim(), payload_mode: webhookMode, body_template: webhookTemplate,
+      min_level: webhookMinLevel, enabled: webhookEnabled,
+    }
+    if (!webhookHeaders.includes('********')) {
+      try {
+        input.headers = JSON.parse(webhookHeaders)
+      } catch {
+        error = 'Webhook headers must be a JSON object.'
+        return null
+      }
+    }
+    return input
+  }
+
+  async function saveWebhook(p: Project) {
+    const input = webhookInput()
+    if (!input) return
+    try {
+      if (editingWebhook) await api.updateWebhook(p.id, editingWebhook, input)
+      else await api.createWebhook(p.id, input)
+      await loadWebhooks(p.id)
+      resetWebhookForm()
+    } catch (e: any) {
+      error = e.message
+    }
+  }
+
+  async function removeWebhook(p: Project, w: Webhook) {
+    try {
+      await api.deleteWebhook(p.id, w.id)
+      await loadWebhooks(p.id)
+      if (editingWebhook === w.id) resetWebhookForm()
+    } catch (e: any) {
+      error = e.message
+    }
+  }
+
+  async function testWebhook(p: Project, w: Webhook) {
+    try {
+      const { delivery } = await api.testWebhook(p.id, w.id)
+      webhookResult = delivery.status === 'sent' ? `Test delivered (HTTP ${delivery.http_status ?? 'success'}).` : `Test ${delivery.status}: ${delivery.error ?? 'unknown error'}`
+    } catch (e: any) {
+      error = e.message
+    }
+  }
+
   const levelOptions = LEVELS.map((l) => ({ value: l, label: LEVEL_LABEL[l] }))
+  const webhookLevelOptions = [{ value: '', label: 'Project default' }, ...levelOptions]
   const origin = typeof location !== 'undefined' ? location.origin : 'https://boop.example.com'
 </script>
 
@@ -134,7 +239,7 @@
           <div class="pname"><span class="n">{p.name}</span><span class="mono muted caption">{p.slug}</span></div>
           <div class="pmeta muted caption">{p.notify ? `notify ≥ ${LEVEL_LABEL[p.min_level].toLowerCase()}` : 'notifications off'} · created {relative(p.created_at)}</div>
         </div>
-        <Button variant="ghost" size="sm" onclick={() => (editing = editing === p.id ? null : p.id)}>{editing === p.id ? 'Close' : 'Settings'}</Button>
+        <Button variant="ghost" size="sm" onclick={() => toggleSettings(p)}>{editing === p.id ? 'Close' : 'Settings'}</Button>
       </div>
 
       {#if editing === p.id}
@@ -154,6 +259,39 @@
           <SettingRow label="API key" hint="Rotating immediately invalidates the current key.">
             <Button variant="secondary" size="sm" onclick={() => rotate(p)}>Rotate key</Button>
           </SettingRow>
+          <section class="webhook-section">
+            <h3>Webhooks</h3>
+            <p class="muted caption">Webhooks fire independently of phone push notifications. Use a silence rule to stop every channel.</p>
+            {#each webhooks as w (w.id)}
+              <div class="webhook-row">
+                <div class="webhook-detail">
+                  <strong>{w.url}</strong>
+                  <span class="muted caption">{w.payload_mode}{w.min_level ? ` · ≥ ${w.min_level}` : ' · project minimum'}</span>
+                </div>
+                <Switch checked={w.enabled} label="Webhook enabled" onchange={async (enabled) => { await api.updateWebhook(p.id, w.id, { enabled }); await loadWebhooks(p.id) }} />
+                <Button variant="ghost" size="sm" onclick={() => editWebhook(w)}>Edit</Button>
+                <Button variant="ghost" size="sm" onclick={() => testWebhook(p, w)}>Send test</Button>
+                <Button variant="danger" size="sm" onclick={() => removeWebhook(p, w)}>Delete</Button>
+              </div>
+            {/each}
+            {#if webhookResult}<p class="caption muted">{webhookResult}</p>{/if}
+            <div class="webhook-form">
+              <div class="form-head"><strong>{editingWebhook ? 'Edit webhook' : 'Add webhook'}</strong><span class="presets">Presets: <button type="button" onclick={() => applyPreset('Slack')}>Slack</button> · <button type="button" onclick={() => applyPreset('Discord')}>Discord</button></span></div>
+              <Input bind:value={webhookURL} placeholder="https://hooks.example.com/..." aria-label="Webhook URL" mono />
+              <Select bind:value={webhookMode} options={[{ value: 'json', label: 'Native JSON' }, { value: 'custom', label: 'Custom template' }]} aria-label="Webhook payload mode" />
+              {#if webhookMode === 'custom'}
+                <label>Body template <textarea bind:value={webhookTemplate} placeholder={'{"text": {{json .Title}}}'}></textarea></label>
+                <p class="muted caption">Fields: <code>.Title</code>, <code>.Body</code>, <code>.Level</code>, <code>.Source</code>, <code>.Project.Name</code>. Wrap any interpolated value in <code>{'{{json .Field}}'}</code> — it emits its own quotes, so don't put quotes around it.</p>
+              {/if}
+              <label>Headers <textarea bind:value={webhookHeaders} aria-label="Webhook headers JSON"></textarea></label>
+              <div class="form-controls">
+                <Select bind:value={webhookMinLevel} options={webhookLevelOptions} aria-label="Webhook minimum level" />
+                <span class="row"><Switch bind:checked={webhookEnabled} label="Webhook enabled" /> Enabled</span>
+                <Button size="sm" onclick={() => saveWebhook(p)}>{editingWebhook ? 'Save webhook' : 'Add webhook'}</Button>
+                {#if editingWebhook}<Button variant="secondary" size="sm" onclick={resetWebhookForm}>Cancel</Button>{/if}
+              </div>
+            </div>
+          </section>
           <SettingRow label="Delete project" hint="Removes the project and every event it received.">
             {#if confirmDelete === p.id}
               <div class="row" in:pop>
@@ -182,6 +320,18 @@
   .n { font: var(--up-type-row-title); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pmeta { margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .edit { margin-top: var(--up-space-4); }
+  .webhook-section { margin: var(--up-space-4) 0; padding: var(--up-space-4) 0; border-top: 1px solid var(--up-border-control); }
+  .webhook-section h3 { margin: 0 0 4px; font: var(--up-type-row-title); }
+  .webhook-row { display: flex; align-items: center; gap: var(--up-space-2); padding: var(--up-space-3) 0; border-bottom: 1px solid var(--up-border-control); }
+  .webhook-detail { flex: 1; min-width: 0; display: grid; gap: 2px; }
+  .webhook-detail strong { font: var(--up-type-code); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .webhook-form { display: grid; gap: var(--up-space-3); margin-top: var(--up-space-4); padding: var(--up-space-3); background: var(--up-bg-hover); border-radius: var(--up-radius-control); }
+  .form-head, .form-controls { display: flex; align-items: center; gap: var(--up-space-3); flex-wrap: wrap; }
+  .presets { margin-left: auto; }
+  .presets button { color: var(--up-accent); background: none; border: 0; padding: 0; cursor: pointer; font: inherit; }
+  label { display: grid; gap: 4px; font: var(--up-type-meta); }
+  textarea { min-height: 72px; width: 100%; resize: vertical; box-sizing: border-box; padding: 8px 10px; border-radius: var(--up-radius-control); border: 1px solid var(--up-border-control); background: var(--up-bg); color: var(--up-ink); font: var(--up-type-code); }
+  @media (max-width: 680px) { .webhook-row { align-items: flex-start; flex-wrap: wrap; } .webhook-detail { width: 100%; flex-basis: 100%; } }
   @media (max-width: 520px) {
     .new { flex-wrap: wrap; }
   }

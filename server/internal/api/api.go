@@ -26,6 +26,7 @@ import (
 	"github.com/chrisgreg/boop/server/internal/projects"
 	"github.com/chrisgreg/boop/server/internal/settings"
 	"github.com/chrisgreg/boop/server/internal/silences"
+	"github.com/chrisgreg/boop/server/internal/webhooks"
 )
 
 // Version is the server version, overridden at build time via -ldflags.
@@ -42,6 +43,7 @@ type Server struct {
 	Pairing    *pairing.Store
 	Events     *events.Store
 	Silences   *silences.Store
+	Webhooks   *webhooks.Store
 	Dispatcher *delivery.Dispatcher
 	APNS       *apns.Client // nil when not configured
 	APNSError  string       // why APNS is nil
@@ -93,6 +95,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/projects/{id}", s.adminAuth(s.updateProject))
 	mux.Handle("DELETE /api/v1/projects/{id}", s.adminAuth(s.deleteProject))
 	mux.Handle("POST /api/v1/projects/{id}/rotate-key", s.adminAuth(s.rotateProjectKey))
+	mux.Handle("GET /api/v1/projects/{id}/webhooks", s.adminAuth(s.listWebhooks))
+	mux.Handle("POST /api/v1/projects/{id}/webhooks", s.adminAuth(s.createWebhook))
+	mux.Handle("PATCH /api/v1/projects/{id}/webhooks/{webhook_id}", s.adminAuth(s.updateWebhook))
+	mux.Handle("DELETE /api/v1/projects/{id}/webhooks/{webhook_id}", s.adminAuth(s.deleteWebhook))
+	mux.Handle("POST /api/v1/projects/{id}/webhooks/{webhook_id}/test", s.adminAuth(s.testWebhook))
 	mux.Handle("POST /api/v1/events/{id}/unsilence", s.adminAuth(s.unsilenceEvent))
 	mux.Handle("GET /api/v1/silences/{id}", s.adminAuth(s.getSilence))
 	mux.Handle("GET /api/v1/silences", s.adminAuth(s.listSilences))
@@ -356,9 +363,9 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 // fail maps domain errors to HTTP responses.
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, projects.ErrNotFound), errors.Is(err, events.ErrNotFound), errors.Is(err, devices.ErrNotFound), errors.Is(err, pairing.ErrNotFound), errors.Is(err, silences.ErrNotFound):
+	case errors.Is(err, projects.ErrNotFound), errors.Is(err, events.ErrNotFound), errors.Is(err, devices.ErrNotFound), errors.Is(err, pairing.ErrNotFound), errors.Is(err, silences.ErrNotFound), errors.Is(err, webhooks.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
-	case errors.Is(err, projects.ErrInvalid), errors.Is(err, events.ErrInvalid), errors.Is(err, devices.ErrInvalid), errors.Is(err, silences.ErrInvalid):
+	case errors.Is(err, projects.ErrInvalid), errors.Is(err, events.ErrInvalid), errors.Is(err, devices.ErrInvalid), errors.Is(err, silences.ErrInvalid), errors.Is(err, webhooks.ErrInvalid):
 		writeError(w, http.StatusUnprocessableEntity, "invalid", err.Error())
 	case errors.Is(err, pairing.ErrInvalidToken):
 		writeError(w, http.StatusUnauthorized, "invalid_pairing_token", err.Error())
